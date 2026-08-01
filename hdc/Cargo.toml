@@ -1,0 +1,34 @@
+[package]
+name = "hdc"
+description = "Muka Rust HDC - a Rust reimplementation of Huawei's HDC (HarmonyOS Device Connector) host tool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hdc"
+path = "src/main.rs"
+
+[dependencies]
+hdc-protocol = { path = "../crates/hdc-protocol" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+rand = "0.8"
+portable-pty = "0.9.0"
+rusb = "0.9"
+libusb1-sys = "0.7"
+libc = "0.2"
+rsa = "0.9"
+sha2 = "0.10"
+base64 = "0.22"
+zip = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }

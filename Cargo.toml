@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/hdc-protocol", "hdc", "hdcd"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Attect"]
+license = "MIT"
+homepage = "https://muka.cool/rust_hdc"
+repository = "https://github.com/Attect/muka_rust_hdc"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
+thiserror = "1.0"
+anyhow = "1.0"
+bytes = "1.7"

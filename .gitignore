@@ -1,0 +1,18 @@
+/target/
+server.log
+*.txt
+
+# Local investigation, downloaded tools, crash dumps, and runtime logs
+/.official_hdc_tmp/
+/.tmp_tools/
+*.log
+*.stackdump
+
+# Machine-specific local build config (e.g. custom target-dir)
+/.cargo/
+
+# AI / IDE development tool directories
+/.codex/
+/.claude/
+/.idea/
+/.vscode/

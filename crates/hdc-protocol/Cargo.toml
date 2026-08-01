@@ -1,0 +1,18 @@
+[package]
+name = "hdc-protocol"
+description = "Protocol primitives shared by the Muka Rust HDC host and daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+aes-gcm = "0.10"
+rand = "0.8"
+
+[dev-dependencies]

@@ -10,7 +10,7 @@
 
 ## 项目背景
 
-官方 HDC 是随 DevEco Studio 分发的闭源 C++ 二进制程序。Muka Rust HDC 使用 Rust 重实现了主机端（以及一个守护进程桩），采用完全相同的线上协议，因此可以：
+HDC 的源码已在 OpenHarmony 开源（[developtools_hdc](https://gitcode.com/openharmony/developtools_hdc) 仓库）。Muka Rust HDC 基于该开源源码，使用 Rust 重实现了主机端（以及一个守护进程桩），采用完全相同的线上协议，因此可以：
 
 - 与真实的 HarmonyOS 设备通信（已在 VID `0x12D1` / PID `0x1101` 设备上验证），
 - 作为 **DevEco Studio** 的后端服务（在 `127.0.0.1:8710` 上提供双协议服务），
@@ -24,7 +24,7 @@
 | `hdcd` | `hdcd/` | 守护进程桩（面向 OpenHarmony 目标；端到端测试使用 Linux 桩） |
 | `hdc-protocol` | `crates/hdc-protocol/` | 共享协议原语（数据包帧、序列化、加密） |
 
-逆向自官方实现的协议参考文档位于 `docs/`：
+基于 OpenHarmony 开源 HDC 源码整理的协议参考文档位于 `docs/`：
 
 - `docs/HDC_SERVER_SOCKET_PROTOCOL.md` —— 客户端↔服务端 Socket 协议（含 DevEco Studio 握手）
 - `docs/USB_TRANSPORT.md` —— USB 传输说明（WinUSB  quirks、端点、超时参数）

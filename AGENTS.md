@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Rust reimplementation of Huawei's HDC (HarmonyOS Device Connector) host tool.
+Rust reimplementation of Huawei's HDC (HarmonyOS Device Connector) host tool, based on the open-source HDC code from OpenHarmony (`developtools_hdc` repo) — **not** a reverse-engineering effort.
 
 - **Workspace crates**: `hdc-protocol`, `hdc` (host), `hdcd` (daemon stub)
 - **Target platform**: Windows (MSVC), Linux, macOS

@@ -2,6 +2,9 @@
 server.log
 *.txt
 
+# Local release build artifacts
+/release-assets/
+
 # Local investigation, downloaded tools, crash dumps, and runtime logs
 /.official_hdc_tmp/
 /.tmp_tools/

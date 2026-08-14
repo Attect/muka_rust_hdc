@@ -95,6 +95,38 @@ Git Bash 会自动转换 Unix 风格的远程路径，需使用双斜杠禁用�
 hdc file send test.txt //data//local//tmp//test.txt
 ```
 
+## 发布构建
+
+单文件发行（每个产物是一个可执行文件，不捆绑任何私有 DLL / so）：
+
+| 产物 | 平台 / 架构 | 依赖说明 |
+|------|-------------|----------|
+| `hdc-windows-x86_64.exe` | Windows x86_64 | MSVC 构建，静态链接 CRT，直接运行 |
+| `hdc-linux-x86_64` | Linux x86_64 | 动态链接，要求 glibc ≥ 2.34 |
+| `hdc-linux-x86_64-glibc2.24` | Linux x86_64 | 动态链接，兼容老系统，要求 glibc ≥ 2.18 |
+| `hdc-linux-x86_64-musl-static` | Linux x86_64 | 完全静态（musl），无任何动态依赖 |
+| `hdc-linux-aarch64` | Linux arm64 | 动态链接，要求 glibc ≥ 2.34 |
+| `hdc-linux-aarch64-glibc2.24` | Linux arm64 | 动态链接，兼容老系统，要求 glibc ≥ 2.18 |
+| `hdc-linux-aarch64-musl-static` | Linux arm64 | 完全静态（musl），无任何动态依赖 |
+
+构建：
+
+```bash
+# Windows（x86_64 MSVC，静态 CRT）
+RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-pc-windows-msvc --bin hdc
+
+# Linux 多平台（在 Linux / WSL 中执行；工具链要求见 scripts/build-release.sh 注释）
+./scripts/build-release.sh x86_64-gnu aarch64-gnu x86_64-musl aarch64-musl x86_64-glibc2.24 aarch64-glibc2.24
+# 产物输出到 target/dist/<name>/
+```
+
+验证：
+
+```bash
+./scripts/verify-release.sh target/dist   # 架构 / glibc 版本需求 / 静态链接检查
+./scripts/smoke-test.sh                   # 冒烟测试（server 模式 + list targets）
+```
+
 ## 开发说明
 
 - `AGENTS.md` 是权威的工程日志：协议细节、文件/应用传输的角色矩阵、已知问题与版本历史。

@@ -4254,7 +4254,7 @@ async fn usb_device_monitor(connect_map: ConnectMap, tcp_map: TcpMap, usb_map: U
         }
     };
     #[cfg(not(target_os = "windows"))]
-    let (mut windows_rx, use_windows_hotplug) = (None, false);
+    let (mut windows_rx, use_windows_hotplug): (Option<tokio::sync::mpsc::UnboundedReceiver<()>>, bool) = (None, false);
 
     // Keep fallback poll at 2 s so that device plug/unplug is detected
     // quickly even if the native event listener misses an event.

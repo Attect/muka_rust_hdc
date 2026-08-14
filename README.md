@@ -127,12 +127,6 @@ RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-
 ./scripts/smoke-test.sh                   # 冒烟测试（server 模式 + list targets）
 ```
 
-## 开发说明
-
-- `AGENTS.md` 是权威的工程日志：协议细节、文件/应用传输的角色矩阵、已知问题与版本历史。
-- `.cargo/config.toml`（机器相关的构建路径）、`.codex/`、`.idea/` 等本地工具目录已被 git 忽略。
-- **请勿**用本仓库构建的二进制覆盖官方的 `hdc.exe`。
-
 ---
 
 *本项目由 AI 辅助实现。*

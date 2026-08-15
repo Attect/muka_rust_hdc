@@ -446,11 +446,17 @@ pub async fn run_server_mode(
     tcp_map: TcpMap,
     usb_map: UsbMap,
 ) -> io::Result<()> {
-    // Parse address and create socket with SO_REUSEADDR to avoid "address already in use"
-    let addr: std::net::SocketAddr = addr_str.parse().map_err(|e| {
-        Error::new(ErrorKind::InvalidInput, format!("Invalid server address: {e}"))
-    })?;
-    let socket = tokio::net::TcpSocket::new_v4()?;
+    // Normalize IPv4-mapped/unbracketed IPv6 forms (e.g. "::ffff:127.0.0.1:8710"
+    // as shown by netstat), then create the socket in the address's own family.
+    let addr: std::net::SocketAddr = crate::parser::normalize_listen_addr(addr_str)
+        .parse()
+        .map_err(|e| {
+            Error::new(ErrorKind::InvalidInput, format!("Invalid server address: {e}"))
+        })?;
+    let socket = match addr {
+        std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+        std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+    };
     socket.set_reuseaddr(true)?;
     socket.bind(addr)?;
     let listener = socket.listen(128)?;

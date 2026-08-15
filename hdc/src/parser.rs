@@ -177,8 +177,34 @@ fn check_port(port_str: &str) -> io::Result<u16> {
         .map_err(|_| Error::new(ErrorKind::InvalidInput, "-s content port incorrect"))
 }
 
+/// Normalize a listen address into a form `std::net::SocketAddr` can parse:
+/// - IPv4-mapped IPv6 without brackets ("::ffff:127.0.0.1:8710", the form shown
+///   by netstat/ss) becomes plain IPv4 ("127.0.0.1:8710");
+/// - unbracketed IPv6 with a port ("::1:8710") becomes bracketed ("[::1]:8710").
+pub(crate) fn normalize_listen_addr(s: &str) -> String {
+    if s.parse::<std::net::SocketAddr>().is_ok() {
+        return s.to_string();
+    }
+    if let Some(rest) = s.to_ascii_lowercase().strip_prefix("::ffff:") {
+        if let Ok(v4) = rest.parse::<std::net::SocketAddrV4>() {
+            return v4.to_string();
+        }
+    }
+    if let Some((host, port)) = s.rsplit_once(':') {
+        if port.parse::<u16>().is_ok()
+            && host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_ipv6())
+        {
+            return format!("[{host}]:{port}");
+        }
+    }
+    s.to_string()
+}
+
 fn parse_server_listen_string(arg: &str) -> io::Result<String> {
-    let segments: Vec<&str> = arg.split(':').collect();
+    let addr = normalize_listen_addr(arg);
+    let segments: Vec<&str> = addr.split(':').collect();
     let port_str = segments.last().copied().unwrap_or("");
     let port = check_port(port_str)?;
 
@@ -187,9 +213,11 @@ fn parse_server_listen_string(arg: &str) -> io::Result<String> {
     }
 
     let port_len = port_str.len();
-    let ip_str = &arg[..arg.len() - port_len - 1];
+    let ip_str = addr[..addr.len() - port_len - 1]
+        .trim_start_matches('[')
+        .trim_end_matches(']');
     match IpAddr::from_str(ip_str) {
-        Ok(ip) if ip.is_ipv4() || ip.is_ipv6() => Ok(arg.to_string()),
+        Ok(ip) if ip.is_ipv4() || ip.is_ipv6() => Ok(addr),
         _ => Err(Error::new(ErrorKind::InvalidInput, "-s content ip incorrect")),
     }
 }
@@ -306,5 +334,51 @@ pub fn auto_connect_key(key: &str, cmd: HdcCommand) -> String {
                 key.to_string()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_listen_addr_keeps_valid_forms() {
+        assert_eq!(normalize_listen_addr("127.0.0.1:8710"), "127.0.0.1:8710");
+        assert_eq!(normalize_listen_addr("0.0.0.0:8710"), "0.0.0.0:8710");
+        assert_eq!(normalize_listen_addr("[::1]:8710"), "[::1]:8710");
+    }
+
+    #[test]
+    fn normalize_listen_addr_mapped_ipv6_becomes_ipv4() {
+        assert_eq!(normalize_listen_addr("::ffff:127.0.0.1:8710"), "127.0.0.1:8710");
+        assert_eq!(normalize_listen_addr("::FFFF:127.0.0.1:8710"), "127.0.0.1:8710");
+        assert_eq!(normalize_listen_addr("::ffff:0.0.0.0:8710"), "0.0.0.0:8710");
+    }
+
+    #[test]
+    fn normalize_listen_addr_unbracketed_ipv6_gets_brackets() {
+        assert_eq!(normalize_listen_addr("::1:8710"), "[::1]:8710");
+    }
+
+    #[test]
+    fn parse_server_listen_string_accepts_mapped_ipv6() {
+        assert_eq!(
+            parse_server_listen_string("::ffff:127.0.0.1:8710").unwrap(),
+            "127.0.0.1:8710"
+        );
+    }
+
+    #[test]
+    fn parse_server_listen_string_accepts_bracketed_ipv6() {
+        assert_eq!(
+            parse_server_listen_string("[::1]:8710").unwrap(),
+            "[::1]:8710"
+        );
+    }
+
+    #[test]
+    fn parse_server_listen_string_rejects_bad_input() {
+        assert!(parse_server_listen_string("garbage:8710").is_err());
+        assert!(parse_server_listen_string("127.0.0.1:notaport").is_err());
     }
 }

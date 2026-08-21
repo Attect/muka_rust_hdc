@@ -83,8 +83,8 @@ pub const DAEOMN_UNAUTHORIZED: &str = "DAEMON_UNAUTH";
 // |----------------------------------------------------------------|
 // | major |reserve| minor |reserve|version|  fix  |   reserve      |
 // |----------------------------------------------------------------|
-// 0x3020_0400 is Ver: 3.2.0e
-const HDC_VERSION_NUMBER: u32 = 0x3020_0400;
+// 0x3020_0500 is Ver: 3.2.0f
+const HDC_VERSION_NUMBER: u32 = 0x3020_0500;
 pub const AUTH_BASE_VERSION: &str = "Ver: 3.2.0b";
 
 pub fn get_version() -> String {
@@ -156,7 +156,6 @@ pub enum HdcCommand {
     KernelHelp = 0,
     KernelHandshake = 1,
     KernelChannelClose = 2,
-    KernelServerKill = 3,
     KernelTargetDiscover = 4,
     KernelTargetList = 5,
     KernelTargetAny = 6,
@@ -170,11 +169,16 @@ pub enum HdcCommand {
     KernelCheckDevice = 14,
     KernelWaitFor = 15,
 
-    KernelServerStart = 16,
-    ClientVersion = 17,
-    ClientKeyGenerate = 18,
-    KernelTargetReconnect = 19,
+    // Values 16-20 mirror the official enum (CMD_SERVER_KILL / CMD_SERVICE_START /
+    // CMD_KERNEL_TARGET_RECONNECT / CMD_SSL_HANDSHAKE). They are only exchanged
+    // between our own client and server as in-process dispatch tags; the wire
+    // encoding between client and server is the plain-text command line.
+    KernelServerKill = 16,
+    KernelServerStart = 17,
+    KernelTargetReconnect = 18,
+    ClientVersion = 19,
     SslHandshake = 20,
+    ClientKeyGenerate = 21,
 
     UnityCommandHead = 1000,
     UnityExecute = 1001,
@@ -246,7 +250,6 @@ impl TryFrom<u32> for HdcCommand {
             0 => Ok(Self::KernelHelp),
             1 => Ok(Self::KernelHandshake),
             2 => Ok(Self::KernelChannelClose),
-            3 => Ok(Self::KernelServerKill),
             4 => Ok(Self::KernelTargetDiscover),
             5 => Ok(Self::KernelTargetList),
             6 => Ok(Self::KernelTargetAny),
@@ -259,11 +262,12 @@ impl TryFrom<u32> for HdcCommand {
             13 => Ok(Self::KernelCheckServer),
             14 => Ok(Self::KernelCheckDevice),
             15 => Ok(Self::KernelWaitFor),
-            16 => Ok(Self::KernelServerStart),
-            17 => Ok(Self::ClientVersion),
-            18 => Ok(Self::ClientKeyGenerate),
-            19 => Ok(Self::KernelTargetReconnect),
+            16 => Ok(Self::KernelServerKill),
+            17 => Ok(Self::KernelServerStart),
+            18 => Ok(Self::KernelTargetReconnect),
+            19 => Ok(Self::ClientVersion),
             20 => Ok(Self::SslHandshake),
+            21 => Ok(Self::ClientKeyGenerate),
             1000 => Ok(Self::UnityCommandHead),
             1001 => Ok(Self::UnityExecute),
             1002 => Ok(Self::UnityRemount),

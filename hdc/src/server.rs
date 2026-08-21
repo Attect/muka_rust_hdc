@@ -1835,6 +1835,15 @@ async fn start_tcp_daemon_session(
     channel_id: u32,
 ) -> io::Result<()> {
     let _ = channel_id;
+    // Official TargetConnect port validation: 1-5 digits, value in 1..=65535.
+    let port_str = addr.rsplit_once(':').map(|(_, p)| p).unwrap_or("");
+    if port_str.is_empty() || port_str.len() > 5 || !port_str.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::new(ErrorKind::InvalidInput, "The port must be digit str"));
+    }
+    match port_str.parse::<u16>() {
+        Ok(port) if port > 0 => {}
+        _ => return Err(Error::new(ErrorKind::InvalidInput, "Port range incorrect")),
+    }
     let stream = TcpStream::connect(addr).await?;
     let session_id = rand::random::<u32>();
     let (mut rd, wr) = stream.into_split();
@@ -2158,6 +2167,17 @@ async fn start_tcp_daemon_session(
                     .await;
             } else if task.command == HdcCommand::KernelChannelClose {
                 let _ = tcp_map_clone.end_channel(task.channel_id).await;
+            } else if matches!(
+                task.command,
+                HdcCommand::FileInit | HdcCommand::FileCheck | HdcCommand::UnityBugreportInit
+            ) {
+                // Official 3.2.0f CheckHostCommandPermission: daemon-initiated file or
+                // bugreport writes to the host are only valid while a matching client
+                // request is active (routed above). Anything else is unauthorized.
+                warn!(
+                    "Drop unauthorized {:?} from daemon sid={} cid={}",
+                    task.command, session_id, task.channel_id
+                );
             } else {
                 let _ = tcp_map_clone
                     .send_channel_message(task.channel_id, &task.payload)
@@ -2622,6 +2642,15 @@ async fn handle_server_file_send(
     result
 }
 
+/// Mirrors official IsHostReceiveChildPath: every '/' or '\\' separated component
+/// must not be "..", and the path must not contain an embedded NUL.
+fn is_host_receive_child_path(path: &str) -> bool {
+    if path.bytes().any(|b| b == 0) {
+        return false;
+    }
+    !path.split(['/', '\\']).any(|component| component == "..")
+}
+
 async fn handle_server_file_recv(
     tcp_map: &TcpMap,
     usb_map: &UsbMap,
@@ -2673,6 +2702,16 @@ async fn handle_server_file_recv(
         debug!("FileCheck received from daemon, payload_len={}", file_check_msg.payload.len());
 
         let config = TransferConfig::deserialize(&file_check_msg.payload).ok();
+        if let Some(cfg) = &config {
+            // Official 3.2.0f host-receive permission check: optionalName must be a
+            // child path (no '..' components, no embedded NUL). We always write to the
+            // client-requested local_path and never to a daemon-supplied path, so this
+            // is an anomaly check rather than a path-selection mechanism.
+            if !is_host_receive_child_path(&cfg.optional_name) {
+                warn!("file recv: daemon sent suspicious optionalName {:?}, continuing with client-specified path",
+                    cfg.optional_name);
+            }
+        }
         let file_size = config.as_ref().map(|c| c.file_size).unwrap_or(0);
         info!("Remote file size: {file_size}");
 
@@ -2778,42 +2817,66 @@ async fn handle_server_app_install(
     channel_id: u32,
     params: &[String],
 ) -> io::Result<()> {
+    // Official HdcHostApp::BeginInstall: args starting with '-' (except the -cwd
+    // pair) are bm-install options passed through in TransferConfig.options;
+    // every other arg is a package path (.hap/.hsp/.app or dir).
     let mut idx = 1;
-    if params.len() > idx + 1 && params[idx] == "-cwd" {
-        idx += 2;
+    let mut client_cwd = String::new();
+    let mut options = String::new();
+    let mut packages: Vec<String> = Vec::new();
+    while idx < params.len() {
+        let arg = &params[idx];
+        if arg == "-cwd" && idx + 1 < params.len() {
+            client_cwd = params[idx + 1].clone();
+            idx += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            if !options.is_empty() {
+                options.push(' ');
+            }
+            options.push_str(arg);
+        } else {
+            packages.push(arg.clone());
+        }
+        idx += 1;
     }
-    let app_path = if params.len() > idx {
-        params[idx].clone()
-    } else {
-        return Err(Error::new(ErrorKind::InvalidInput, "Missing app path"));
-    };
+    if packages.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput, "[E006001] Not any installation package was found"));
+    }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TaskMessage>();
     usb_map.register_response_channel(session_id, channel_id, tx).await;
 
-    let mut cleanup_dir: Option<PathBuf> = None;
+    let mut cleanup_dirs: Vec<PathBuf> = Vec::new();
     let result = async {
-        let is_app_pack = Path::new(&app_path)
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s.eq_ignore_ascii_case("app"))
-            .unwrap_or(false);
-
-        let hap_paths: Vec<PathBuf> = if is_app_pack {
-            let temp_dir = std::env::temp_dir().join(format!("hdc_app_extract_{}", rand::random::<u32>()));
-            std::fs::create_dir_all(&temp_dir)?;
-            let haps = extract_haps_from_app(&app_path, &temp_dir)?;
-            if haps.is_empty() {
-                return Err(Error::new(ErrorKind::InvalidData, "No .hap found in .app package"));
+        for package in &packages {
+            let mut app_path = package.clone();
+            if !client_cwd.is_empty() && !Path::new(&app_path).is_absolute() {
+                app_path = format!("{client_cwd}{app_path}");
             }
-            cleanup_dir = Some(temp_dir);
-            haps
-        } else {
-            vec![PathBuf::from(&app_path)]
-        };
+            let is_app_pack = Path::new(&app_path)
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("app"))
+                .unwrap_or(false);
 
-        for hap_path in &hap_paths {
-            install_single_hap(tcp_map, usb_map, session_id, channel_id, &mut rx, hap_path).await?;
+            let hap_paths: Vec<PathBuf> = if is_app_pack {
+                let temp_dir = std::env::temp_dir().join(format!("hdc_app_extract_{}", rand::random::<u32>()));
+                std::fs::create_dir_all(&temp_dir)?;
+                let haps = extract_haps_from_app(&app_path, &temp_dir)?;
+                if haps.is_empty() {
+                    return Err(Error::new(ErrorKind::InvalidData, "No .hap found in .app package"));
+                }
+                cleanup_dirs.push(temp_dir);
+                haps
+            } else {
+                vec![PathBuf::from(&app_path)]
+            };
+
+            for hap_path in &hap_paths {
+                install_single_hap(tcp_map, usb_map, session_id, channel_id, &mut rx, hap_path, &options).await?;
+            }
         }
 
         maybe_end_channel(tcp_map, channel_id).await;
@@ -2821,7 +2884,7 @@ async fn handle_server_app_install(
     }.await;
 
     usb_map.unregister_response_channel(session_id, channel_id).await;
-    if let Some(dir) = cleanup_dir {
+    for dir in cleanup_dirs {
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
     result
@@ -2859,6 +2922,7 @@ async fn install_single_hap(
     channel_id: u32,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<TaskMessage>,
     app_path: &Path,
+    options: &str,
 ) -> io::Result<()> {
     let app_path_str = app_path.to_str().unwrap_or("app.hap");
     let file_name = app_path
@@ -2892,7 +2956,7 @@ async fn install_single_hap(
                 file_size,
                 atime: 0,
                 mtime: 0,
-                options: String::new(),
+                options: options.to_string(),
                 path: remote_path.clone(),
                 optional_name: file_name.to_string(),
                 update_if_new: false,
@@ -4613,6 +4677,17 @@ async fn start_usb_session(
                     // the client ignores. Since send_channel_message sends length-prefixed
                     // raw data, forwarding the payload would corrupt client output.
                     let _ = tcp_map.end_channel(task.channel_id).await;
+                } else if matches!(
+                    task.command,
+                    HdcCommand::FileInit | HdcCommand::FileCheck | HdcCommand::UnityBugreportInit
+                ) {
+                    // Official 3.2.0f CheckHostCommandPermission: daemon-initiated file or
+                    // bugreport writes to the host are only valid while a matching client
+                    // request is active (routed above). Anything else is unauthorized.
+                    warn!(
+                        "Drop unauthorized {:?} from daemon sid={} cid={}",
+                        task.command, session_id, task.channel_id
+                    );
                 } else {
                     let _ = tcp_map.send_channel_message(task.channel_id, &task.payload).await;
                 }

@@ -80,10 +80,12 @@ Match official tool:
 - [x] **File Recv** (`hdc file recv <remote> <local>`)
   - Daemon = master (reader), host = slave (writer)
   - Flow: `FileInit` → `WakeupSlavetask` → `FileCheck` (TransferConfig) → open local file → `FileBegin` → `FileData` (64-byte header) → `FileFinish[1]` (from host) → `FileFinish[0]` (from daemon)
+  - Security (aligned with official 3.2.0f host-receive permit): the server only writes to the client-requested local path, never to daemon-supplied paths; daemon-sent `TransferConfig.optionalName` is validated as a child path (no `..`/NUL); unsolicited daemon-initiated `FileInit`/`FileCheck`/`BugreportInit` (no active client request) are dropped with a warning
 
 ### App Install
-- [x] **App Install** (`hdc install <path.hap>`)
+- [x] **App Install** (`hdc install [options] <path...>`)
   - Same transfer protocol as file send, but commands are `AppInit`/`AppCheck`/`AppBegin`/`AppData`/`AppFinish`
+  - Options starting with `-` (e.g. `-r`, `-g`, `-s`) are passed through to the daemon in `TransferConfig.options` and appended to the `bm install` command line; supports multiple package paths in one invocation
   - Daemon auto-runs `bm install -p <path>` after receiving all data
   - Daemon sends `AppFinish[mode, result, message]` with install result
   - Tested successfully with 1.4MB signed HAP file
@@ -241,6 +243,7 @@ target/release/hdc.exe -t <ip>:<port> shell echo hello   # -t selection pending
 
 | Date | Version | Notes |
 |------|---------|-------|
+| 2026-08-21 | **3.2.0f** | Aligned with official master (0x30200500). Added daemon→host unauthorized command filtering (FileInit/FileCheck/BugreportInit dropped unless a client request is active, equivalent of official host-receive permit), file-recv optionalName child-path check, install options passthrough (`-r`/`-g`/`-s` etc. → TransferConfig.options) with multi-package install, `tmode` argument validation, port validation (1-5 digits, 1..65535), fixed CLI `reconnect`. Internal command IDs renumbered to official enum (ServerKill=16, ServerStart=17, TargetReconnect=18). |
 | 2026-06-11 | **3.2.0e** | Upgraded from 3.0.0e. Aligned with official C++ protocol. Added heartbeat, large file transfer optimization (511KB IO buf), new commands (HeartbeatMsg, SpawnSub, KernelTargetReconnect, SslHandshake, UnityExecuteEx). |
 | 2026-06-11 | **3.2.0e+deveco** | Fixed DevEco Studio compatibility. Discovered DevEco Studio connects to hdc server via TCP socket using a 48-byte `OHOS HDC` handshake + length-prefixed command protocol. Implemented dual-protocol server to support both our hdc client and DevEco Studio IDE. |
 | Before | 3.0.0e | Initial implementation based on OpenHarmony 3.0.0e protocol. |
@@ -268,7 +271,7 @@ For IDE socket commands that require daemon interaction, the server creates a vi
 - `target mount` / `target boot` / `smode` / `hilog` / `bugreport` – unity commands.
 
 ## 官方HDC
-克隆https://gitcode.com/openharmony/developtools_hdc.git
+克隆https://gitcode.com/openharmony/developtools_hdc.git （本地参考克隆存放于 `.official_hdc_tmp/developtools_hdc`，已被 .gitignore 忽略）
 
 ## TODO / Remaining Work
 

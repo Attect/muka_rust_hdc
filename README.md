@@ -6,7 +6,7 @@
 - **项目网站**：<https://muka.cool/rust_hdc>
 - **代码仓库**：<https://github.com/Attect/muka_rust_hdc>
 - **开源协议**：MIT
-- **协议版本**：对齐官方 HDC **3.2.0e**
+- **协议版本**：对齐官方 HDC **3.2.0f**
 
 ## 项目背景
 

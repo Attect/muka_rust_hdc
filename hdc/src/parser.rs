@@ -90,7 +90,9 @@ Commands:
   shell - [cmd]             Execute shell with bundle options
   file send <local> <remote> Send file to device
   file recv <remote> <local> Receive file from device
-  install <path>            Install application
+  install [options] <path...>  Install application package(s) (.hap/.hsp/.app)
+                              options are passed to 'bm install' (e.g. -r replace,
+                              -g grant permissions, -s shared bundle)
   uninstall <package>       Uninstall application
   fport [ls|rm]             Forward port management
   rport [ls|rm]             Reverse port management
@@ -172,9 +174,17 @@ pub fn split_opt_and_cmd(input: Vec<String>) -> Parsed {
 }
 
 fn check_port(port_str: &str) -> io::Result<u16> {
-    port_str
-        .parse::<u16>()
-        .map_err(|_| Error::new(ErrorKind::InvalidInput, "-s content port incorrect"))
+    // Official ValidatePort: 1-5 digit characters, value in 1..=65535.
+    if port_str.is_empty()
+        || port_str.len() > 5
+        || !port_str.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(Error::new(ErrorKind::InvalidInput, "The port must be digit str"));
+    }
+    match port_str.parse::<u16>() {
+        Ok(port) if port > 0 => Ok(port),
+        _ => Err(Error::new(ErrorKind::InvalidInput, "Port range incorrect")),
+    }
 }
 
 /// Normalize a listen address into a form `std::net::SocketAddr` can parse:

@@ -113,7 +113,14 @@ impl Client {
             HdcCommand::AppUninstall => self.app_uninstall_task().await,
             HdcCommand::UnityRunmode
             | HdcCommand::UnityReboot
-            | HdcCommand::UnityRemount => self.unity_task().await,
+            | HdcCommand::UnityRemount => {
+                // Official RunMode: 'tmode' without an argument is rejected client-side.
+                if self.command == HdcCommand::UnityRunmode && self.params.len() < 2 {
+                    return Err(Error::new(ErrorKind::Other, "Error input parameter"));
+                }
+                self.unity_task().await
+            }
+            HdcCommand::KernelTargetReconnect => self.unity_task().await,
             HdcCommand::UnityRootrun => self.unity_root_run_task().await,
             HdcCommand::UnityExecute | HdcCommand::UnityExecuteEx => self.shell_task().await,
             HdcCommand::KernelWaitFor => self.wait_task().await,

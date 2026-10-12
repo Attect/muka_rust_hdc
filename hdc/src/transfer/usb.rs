@@ -69,9 +69,9 @@ pub async fn send_usb_soft_reset(
     session_id: u32,
 ) -> io::Result<()> {
     let header = build_usb_header(session_id, USB_OPTION_RESET, 0);
-    tracing::info!("send_usb_soft_reset: writing {} bytes", header.len());
+    tracing::debug!("send_usb_soft_reset: writing {} bytes", header.len());
     conn.write_bulk(endpoint, &header, 5000).await?;
-    tracing::info!("send_usb_soft_reset: write done");
+    tracing::debug!("send_usb_soft_reset: write done");
     Ok(())
 }
 
@@ -89,15 +89,15 @@ pub async fn send_usb_raw(
 
     // 1) Send USB header (11 bytes) as its own transfer
     let header = build_usb_header(session_id, USB_OPTION_HEADER, payload_len as u32);
-    tracing::info!("send_usb_raw: writing header {} bytes", header.len());
+    tracing::debug!("send_usb_raw: writing header {} bytes", header.len());
     conn.write_bulk(endpoint, &header, 30000).await?;
-    tracing::info!("send_usb_raw: header written");
+    tracing::debug!("send_usb_raw: header written");
 
     // 2) Send payload as a separate transfer
     if !payload.is_empty() {
-        tracing::info!("send_usb_raw: writing payload {} bytes", payload.len());
+        tracing::debug!("send_usb_raw: writing payload {} bytes", payload.len());
         conn.write_bulk(endpoint, payload, 30000).await?;
-        tracing::info!("send_usb_raw: payload written");
+        tracing::debug!("send_usb_raw: payload written");
     }
 
     // 3) If payload is an exact multiple of max_packet_size, send a dummy header
@@ -105,9 +105,9 @@ pub async fn send_usb_raw(
     // message is complete.
     if payload_len > 0 && (payload_len % max_packet_size as usize == 0) {
         let dummy = build_usb_header(session_id, 0, 0);
-        tracing::info!("send_usb_raw: writing dummy header {} bytes", dummy.len());
+        tracing::debug!("send_usb_raw: writing dummy header {} bytes", dummy.len());
         conn.write_bulk(endpoint, &dummy, 30000).await?;
-        tracing::info!("send_usb_raw: dummy header written");
+        tracing::debug!("send_usb_raw: dummy header written");
     }
 
     Ok(())
@@ -132,12 +132,12 @@ pub async fn recv_usb_message(
 ) -> io::Result<(u32, TaskMessage)> {
     // Read and parse USBHead
     let head_data = read_exact_from_usb(conn, endpoint, USB_HEAD_SIZE, 0).await?; // 0 = infinite timeout
-    tracing::info!("recv_usb_message: head={:02x?}", head_data);
+    tracing::trace!("recv_usb_message: head={:02x?}", head_data);
     let usb_head = UsbHead::deserialize(&head_data)?;
     let session_id = usb_head.session_id;
     let data_size = usb_head.data_size as usize;
     let option = usb_head.option;
-    tracing::info!("recv_usb_message: session_id={session_id}, data_size={data_size}, option={option}");
+    tracing::debug!("recv_usb_message: session_id={session_id}, data_size={data_size}, option={option}");
 
     // Handle special packets (reset, dummy/ZLP)
     if data_size == 0 {
@@ -157,7 +157,7 @@ pub async fn recv_usb_message(
 
     // Read the actual payload (PayloadHead + PayloadProtect + Payload)
     let payload_data = read_exact_from_usb(conn, endpoint, data_size, 0).await?;
-    tracing::info!("recv_usb_message: payload={:02x?} ({} bytes)", payload_data, payload_data.len());
+    tracing::trace!("recv_usb_message: payload={:02x?} ({} bytes)", payload_data, payload_data.len());
 
     // Parse PayloadHead
     if payload_data.len() < HEAD_SIZE {

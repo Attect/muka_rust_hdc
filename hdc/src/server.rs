@@ -4255,84 +4255,199 @@ async fn run_rport_bridge(
 use std::collections::HashSet;
 use std::time::Duration;
 
-/// Enumerate HarmonyOS USB devices and start sessions for any newly-discovered
-/// devices.  Already-managed devices are tracked in `known_devices`.
+/// Outcome of a USB session attempt, used for reconnect backoff and aggregated
+/// failure logging (log on state change / first occurrence, not per retry).
+enum SessionOutcome {
+    /// Session reached "authenticated" state and later ended.
+    Ended { clean: bool, reason: String },
+    /// Session failed before authentication completed.
+    Failed(String),
+}
+
+/// Per-serial reconnect bookkeeping for the USB device monitor.
+struct ReconnectState {
+    failures: u32,
+    last_error: String,
+    next_attempt: std::time::Instant,
+}
+
+const RECONNECT_BACKOFF_BASE_SECS: u64 = 1;
+const RECONNECT_BACKOFF_MAX_SECS: u64 = 30;
+
+/// Slow safety poll for the device monitor. Plug/unplug is normally detected
+/// by hotplug events; this only covers missed events and re-adoption after
+/// backoff expiry.
+const FALLBACK_POLL_SECS: u64 = 30;
+
+/// Enumerate HarmonyOS USB devices and start sessions for newly-adopted
+/// devices.
+///
+/// Logging is change-driven:
+/// - a device entering/leaving the physical device set logs one line each;
+/// - an unchanged device set logs nothing (enumeration itself logs at debug);
+/// - session retries are gated by a per-serial exponential backoff, and
+///   repeated identical failures are aggregated instead of re-logged.
 async fn process_usb_device_changes(
     known_devices: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+    physical_devices: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+    reconnect: &Arc<tokio::sync::Mutex<HashMap<String, ReconnectState>>>,
     connect_map: &ConnectMap,
     tcp_map: &TcpMap,
     usb_map: &UsbMap,
     forward_map: &ForwardMap,
 ) {
     let devices = crate::usb::enumerate_harmony_devices().await;
+    let now = std::time::Instant::now();
+
+    // Physical arrival/removal detection: log only when the device set changes.
+    {
+        let mut snapshot = physical_devices.lock().await;
+        let current: HashSet<String> = devices.iter().map(|d| d.serial_number.clone()).collect();
+        let arrivals: Vec<String> = current.difference(&snapshot).cloned().collect();
+        let removals: Vec<String> = snapshot.difference(&current).cloned().collect();
+        if !arrivals.is_empty() || !removals.is_empty() {
+            *snapshot = current;
+        }
+        for serial in &arrivals {
+            info!("USB device arrived: serial={serial}");
+            // A freshly (re-)plugged device must reconnect immediately,
+            // regardless of any pending backoff from earlier failures.
+            reconnect.lock().await.remove(serial);
+        }
+        for serial in &removals {
+            info!("USB device removed: serial={serial}");
+        }
+    }
+
     let mut known = known_devices.lock().await;
 
     for dev in &devices {
-        if !known.contains(&dev.serial_number) {
-            known.insert(dev.serial_number.clone());
-            info!(
-                "USB device discovered: serial={}, VID={:04X}, PID={:04X}",
-                dev.serial_number, dev.vendor_id, dev.product_id
-            );
+        if known.contains(&dev.serial_number) {
+            continue;
+        }
 
-            // Add to ConnectMap with Ready status initially
-            connect_map.put(dev.serial_number.clone(), DaemonInfo {
-                session_id: 0,
-                conn_type: ConnectType::Usb(format!("{}", dev.device_address)),
-                conn_status: ConnStatus::Ready,
-                dev_name: String::new(),
-                version: String::new(),
-            }).await;
+        // Reconnect backoff: skip devices that recently failed and are still
+        // waiting to retry.
+        {
+            let state = reconnect.lock().await;
+            if let Some(st) = state.get(&dev.serial_number) {
+                if now < st.next_attempt {
+                    continue;
+                }
+            }
+        }
 
-            // Start USB session in background
-            let cm = connect_map.clone();
-            let tm = tcp_map.clone();
-            let um = usb_map.clone();
-            let fm = forward_map.clone();
-            let kd = known_devices.clone();
-            let serial = dev.serial_number.clone();
-            tokio::spawn(async move {
-                start_usb_session(serial.clone(), cm, tm, um, fm).await;
-                // Session ended (success or failure) - remove from known so it can be re-discovered
-                kd.lock().await.remove(&serial);
-                info!("USB session ended for {serial}, allowing re-discovery");
+        known.insert(dev.serial_number.clone());
+        debug!(
+            "USB device adopted for session: serial={}, VID={:04X}, PID={:04X}",
+            dev.serial_number, dev.vendor_id, dev.product_id
+        );
+
+        // Add to ConnectMap with Ready status initially
+        connect_map.put(dev.serial_number.clone(), DaemonInfo {
+            session_id: 0,
+            conn_type: ConnectType::Usb(format!("{}", dev.device_address)),
+            conn_status: ConnStatus::Ready,
+            dev_name: String::new(),
+            version: String::new(),
+        }).await;
+
+        // Start USB session in background
+        let cm = connect_map.clone();
+        let tm = tcp_map.clone();
+        let um = usb_map.clone();
+        let fm = forward_map.clone();
+        let kd = known_devices.clone();
+        let rc = reconnect.clone();
+        let serial = dev.serial_number.clone();
+        tokio::spawn(async move {
+            let outcome = start_usb_session(serial.clone(), cm, tm, um, fm).await;
+            // Session ended (success or failure) - remove from known so it can
+            // be re-adopted once its backoff expires.
+            kd.lock().await.remove(&serial);
+            record_session_outcome(&rc, &serial, outcome).await;
+        });
+    }
+}
+
+/// Record the outcome of a finished USB session: reset backoff on clean
+/// disconnect, otherwise advance the per-serial exponential backoff and log
+/// the failure once (repeats of the same error collapse into a debug line).
+async fn record_session_outcome(
+    reconnect: &Arc<tokio::sync::Mutex<HashMap<String, ReconnectState>>>,
+    serial: &str,
+    outcome: SessionOutcome,
+) {
+    match outcome {
+        SessionOutcome::Ended { clean, reason } => {
+            reconnect.lock().await.remove(serial);
+            if clean {
+                info!("USB device disconnected: serial={serial}, reason={reason}");
+            } else {
+                warn!("USB session ended unexpectedly: serial={serial}, reason={reason}");
+            }
+        }
+        SessionOutcome::Failed(err) => {
+            let mut state = reconnect.lock().await;
+            let st = state.entry(serial.to_string()).or_insert(ReconnectState {
+                failures: 0,
+                last_error: String::new(),
+                next_attempt: std::time::Instant::now(),
             });
+            st.failures += 1;
+            let shift = (st.failures - 1).min(5);
+            let backoff = (RECONNECT_BACKOFF_BASE_SECS << shift).min(RECONNECT_BACKOFF_MAX_SECS);
+            st.next_attempt = std::time::Instant::now() + Duration::from_secs(backoff);
+            if st.failures == 1 || err != st.last_error {
+                warn!(
+                    "USB session failed (attempt {}): serial={serial}, error={err}; retrying in {backoff}s",
+                    st.failures
+                );
+            } else {
+                debug!(
+                    "USB session failed (attempt {}, same error as before): serial={serial}; retrying in {backoff}s",
+                    st.failures
+                );
+            }
+            st.last_error = err;
         }
     }
 }
 
 async fn usb_device_monitor(connect_map: ConnectMap, tcp_map: TcpMap, usb_map: UsbMap, forward_map: ForwardMap) {
     let known_devices = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+    // Physical device snapshot for arrival/removal change detection.
+    let physical_devices = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+    // Per-serial reconnect backoff state.
+    let reconnect: Arc<tokio::sync::Mutex<HashMap<String, ReconnectState>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     // Attempt to use libusb hotplug events; fall back to polling if unavailable.
     let mut hotplug_rx = crate::usb::spawn_hotplug_watcher();
     let use_hotplug = hotplug_rx.is_some();
 
     // On Windows, libusb hotplug is unavailable.  Use a native WM_DEVICECHANGE
-    // watcher instead of aggressive 2 s polling.
+    // watcher; enumeration is event-driven with a slow safety poll.
     #[cfg(target_os = "windows")]
     let (mut windows_rx, use_windows_hotplug) = if use_hotplug {
         (None, false)
     } else {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         if crate::usb_hotplug_windows::spawn_windows_usb_watcher(tx) {
-            info!("USB device monitor: using Windows native device-change events with 30 s fallback polling");
+            info!("USB device monitor: using Windows native device-change events with {FALLBACK_POLL_SECS}s fallback polling");
             (Some(rx), true)
         } else {
-            info!("USB device monitor: Windows native watcher unavailable, using 30 s polling");
+            info!("USB device monitor: Windows native watcher unavailable, using {FALLBACK_POLL_SECS}s polling");
             (None, false)
         }
     };
     #[cfg(not(target_os = "windows"))]
     let (mut windows_rx, use_windows_hotplug): (Option<tokio::sync::mpsc::UnboundedReceiver<()>>, bool) = (None, false);
 
-    // Keep fallback poll at 2 s so that device plug/unplug is detected
-    // quickly even if the native event listener misses an event.
-    let poll_interval = Duration::from_secs(2);
-    let mut poll_timer = tokio::time::interval(poll_interval);
+    let mut poll_timer = tokio::time::interval(Duration::from_secs(FALLBACK_POLL_SECS));
 
     loop {
-        process_usb_device_changes(&known_devices, &connect_map, &tcp_map, &usb_map, &forward_map).await;
+        process_usb_device_changes(&known_devices, &physical_devices, &reconnect, &connect_map, &tcp_map, &usb_map, &forward_map).await;
 
         if use_hotplug {
             tokio::select! {
@@ -4367,21 +4482,24 @@ async fn usb_device_monitor(connect_map: ConnectMap, tcp_map: TcpMap, usb_map: U
 }
 
 /// Start a USB session with a HarmonyOS device.
+///
+/// Per-attempt details log at debug; failures are returned as
+/// [`SessionOutcome::Failed`] so the monitor can aggregate retries instead of
+/// logging every attempt.
 async fn start_usb_session(
     serial: String,
     connect_map: ConnectMap,
     tcp_map: TcpMap,
     usb_map: UsbMap,
     forward_map: ForwardMap,
-) {
-    info!("Starting USB session for device {serial}");
+) -> SessionOutcome {
+    debug!("Starting USB session for device {serial}");
 
     let connection = match crate::usb::connect_usb_device(&serial).await {
         Ok(conn) => conn,
         Err(e) => {
-            error!("Failed to connect USB device {serial}: {e}");
             connect_map.update_status(&serial, ConnStatus::Offline).await;
-            return;
+            return SessionOutcome::Failed(format!("open device: {e}"));
         }
     };
 
@@ -4394,15 +4512,14 @@ async fn start_usb_session(
     let conn = std::sync::Arc::new(connection);
 
     // Step 1: Send soft-reset to daemon
-    info!("Sending USB soft-reset for {serial}");
+    debug!("Sending USB soft-reset for {serial}");
     if let Err(e) = crate::transfer::usb::send_usb_soft_reset(&*conn, bulk_out, 0).await {
-        error!("USB soft-reset send failed for {serial}: {e}");
         connect_map.update_status(&serial, ConnStatus::Offline).await;
-        return;
+        return SessionOutcome::Failed(format!("soft-reset send: {e}"));
     }
 
     // Step 2: Clear USB channel - read and discard stale data for a short period
-    info!("Clearing USB channel for {serial}");
+    debug!("Clearing USB channel for {serial}");
     let clear_start = std::time::Instant::now();
     let clear_timeout = std::time::Duration::from_millis(1000);
     let mut drop_bytes: usize = 0;
@@ -4422,7 +4539,7 @@ async fn start_usb_session(
             Err(_) => break,
         }
     }
-    info!("USB channel cleared for {serial}, dropped {drop_bytes} bytes");
+    debug!("USB channel cleared for {serial}, dropped {drop_bytes} bytes");
 
     // Step 3 & 4: Send initial handshake and perform authentication exchange
     let auth_tlv = format!("authtype{:8}1{:15}1", "", "");
@@ -4442,21 +4559,20 @@ async fn start_usb_session(
         payload: handshake.serialize(),
     };
     if let Err(e) = crate::transfer::usb::send_usb_message(&*conn, bulk_out, session_id, &msg, max_packet_size).await {
-        error!("USB handshake send failed for {serial}: {e}");
         connect_map.update_status(&serial, ConnStatus::Offline).await;
-        return;
+        return SessionOutcome::Failed(format!("handshake send: {e}"));
     }
-    info!("USB initial handshake sent for {serial}, waiting for daemon response...");
+    debug!("USB initial handshake sent for {serial}, waiting for daemon response...");
 
-    // Authentication exchange loop
+    // Authentication exchange loop; each `break` carries the failure reason
+    // which the monitor logs aggregated across retries.
     let mut auth_attempts = 0u32;
     let mut last_daemon_buf = String::new();
     const MAX_AUTH_ATTEMPTS: u32 = 10;
-    let auth_ok = loop {
+    let auth_result: Result<(), String> = loop {
         auth_attempts += 1;
         if auth_attempts > MAX_AUTH_ATTEMPTS {
-            error!("USB authentication exceeded max attempts for {serial}");
-            break false;
+            break Err("auth exceeded max attempts".to_string());
         }
 
         // After sending public key (attempt 2), device may show a UI confirmation dialog.
@@ -4473,58 +4589,52 @@ async fn start_usb_session(
         ).await {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
-                error!("USB auth recv failed for {serial}: {e}");
-                break false;
+                break Err(format!("auth recv: {e}"));
             }
             Err(_) => {
                 if auth_attempts == 2 {
-                    error!("USB auth timeout for {serial} after 60s. Please check if the device shows a USB debugging authorization dialog and confirm it on the device.");
-                } else {
-                    error!("USB auth timeout for {serial}");
+                    break Err("auth timeout after 60s - confirm the USB debugging authorization dialog on the device".to_string());
                 }
-                break false;
+                break Err("auth timeout".to_string());
             }
         };
 
         if daemon_resp.command != HdcCommand::KernelHandshake {
-            warn!("Unexpected command during auth for {serial}: {:?}", daemon_resp.command);
+            debug!("Unexpected command during auth for {serial}: {:?}", daemon_resp.command);
             continue;
         }
 
         let daemon_hs = match SessionHandShake::deserialize(&daemon_resp.payload) {
             Ok(hs) => hs,
             Err(e) => {
-                error!("Failed to deserialize daemon handshake for {serial}: {e}");
-                break false;
+                break Err(format!("auth handshake deserialize: {e}"));
             }
         };
         last_daemon_buf = daemon_hs.buf.clone();
 
         // Update session_id from daemon response (daemon may assign a new session_id)
         if resp_session_id != 0 && resp_session_id != session_id {
-            info!("Updating session_id for {serial}: {} -> {resp_session_id}", session_id);
+            debug!("Updating session_id for {serial}: {} -> {resp_session_id}", session_id);
             session_id = resp_session_id;
             handshake.session_id = session_id;
         }
 
-        info!("Daemon auth response for {serial}: auth_type={}, buf_len={}", daemon_hs.auth_type, daemon_hs.buf.len());
+        debug!("Daemon auth response for {serial}: auth_type={}, buf_len={}", daemon_hs.auth_type, daemon_hs.buf.len());
 
         match daemon_hs.auth_type {
             x if x == AuthType::Ok as u8 => {
                 info!("USB authentication successful for {serial}");
-                break true;
+                break Ok(());
             }
             x if x == AuthType::Fail as u8 => {
-                error!("USB authentication rejected by daemon for {serial}");
-                break false;
+                break Err("authentication rejected by daemon".to_string());
             }
             x if x == AuthType::Publickey as u8 => {
-                info!("Daemon requests public key for {serial}");
+                debug!("Daemon requests public key for {serial}");
                 let pubkey_info = match crate::auth::get_public_key_info() {
                     Ok(info) => info,
                     Err(e) => {
-                        error!("Failed to get public key info for {serial}: {e}");
-                        break false;
+                        break Err(format!("get public key: {e}"));
                     }
                 };
                 handshake.auth_type = AuthType::Publickey as u8;
@@ -4536,19 +4646,17 @@ async fn start_usb_session(
                     payload: handshake.serialize(),
                 };
                 if let Err(e) = crate::transfer::usb::send_usb_message(&*conn, bulk_out, session_id, &msg, max_packet_size).await {
-                    error!("Failed to send public key for {serial}: {e}");
-                    break false;
+                    break Err(format!("send public key: {e}"));
                 }
-                info!("Public key sent to daemon for {serial}. If this is the first connection, please confirm USB debugging authorization on the device.");
+                debug!("Public key sent to daemon for {serial}. If this is the first connection, please confirm USB debugging authorization on the device.");
             }
             x if x == AuthType::Signature as u8 => {
-                info!("Daemon sends signature challenge for {serial}");
+                debug!("Daemon sends signature challenge for {serial}");
                 let challenge = daemon_hs.buf;
                 let signature = match crate::auth::rsa_sign_challenge(&challenge) {
                     Ok(sig) => sig,
                     Err(e) => {
-                        error!("Failed to sign challenge for {serial}: {e}");
-                        break false;
+                        break Err(format!("sign challenge: {e}"));
                     }
                 };
                 handshake.auth_type = AuthType::Signature as u8;
@@ -4560,25 +4668,22 @@ async fn start_usb_session(
                     payload: handshake.serialize(),
                 };
                 if let Err(e) = crate::transfer::usb::send_usb_message(&*conn, bulk_out, session_id, &msg, max_packet_size).await {
-                    error!("Failed to send signature for {serial}: {e}");
-                    break false;
+                    break Err(format!("send signature: {e}"));
                 }
-                info!("Signature sent to daemon for {serial}");
+                debug!("Signature sent to daemon for {serial}");
             }
             x if x == AuthType::Token as u8 => {
-                warn!("Daemon requested token auth for {serial}, not supported");
-                break false;
+                break Err("daemon requested token auth (unsupported)".to_string());
             }
             other => {
-                warn!("Unknown auth type from daemon for {serial}: {other}");
-                break false;
+                break Err(format!("unknown auth type {other}"));
             }
         }
     };
 
-    if !auth_ok {
+    if let Err(reason) = auth_result {
         connect_map.update_status(&serial, ConnStatus::Offline).await;
-        return;
+        return SessionOutcome::Failed(reason);
     }
 
     // Update ConnectMap to Connected
@@ -4612,21 +4717,22 @@ async fn start_usb_session(
         let _ = usb_map_for_cleanup.end_session(session_id).await;
     });
 
-    // Read loop: forward daemon responses to client channels
+    // Read loop: forward daemon responses to client channels.
+    // Evaluates to (clean, reason) when the session ends.
     let serial_for_reader = serial.clone();
     let reader_conn = conn.clone();
-    loop {
+    let (clean, reason) = loop {
         match crate::transfer::usb::recv_usb_message(&*reader_conn, bulk_in).await {
             Ok((_resp_session_id, task)) => {
                 let payload_preview = String::from_utf8_lossy(&task.payload[..task.payload.len().min(100)]);
-                info!("USB recv for {serial_for_reader}: cmd={:?}, channel_id={}, payload_len={}, payload_preview='{}'",
+                debug!("USB recv for {serial_for_reader}: cmd={:?}, channel_id={}, payload_len={}, payload_preview='{}'",
                     task.command, task.channel_id, task.payload.len(), payload_preview.trim_end());
                 if task.command == HdcCommand::KernelHandshake {
                     // Daemon may send additional handshake messages after auth OK (e.g., new signature challenge)
                     if let Ok(daemon_hs) = SessionHandShake::deserialize(&task.payload) {
                         match daemon_hs.auth_type {
                             x if x == AuthType::Signature as u8 => {
-                                info!("Daemon sends post-auth signature challenge for {serial_for_reader}");
+                                debug!("Daemon sends post-auth signature challenge for {serial_for_reader}");
                                 if let Ok(signature) = crate::auth::rsa_sign_challenge(&daemon_hs.buf) {
                                     let mut reply_hs = SessionHandShake {
                                         banner: HANDSHAKE_MESSAGE.to_string(),
@@ -4645,12 +4751,12 @@ async fn start_usb_session(
                                     if let Err(e) = usb_map.send_to_session(session_id, &reply_data).await {
                                         warn!("Failed to send post-auth signature reply for {serial_for_reader}: {e}");
                                     } else {
-                                        info!("Post-auth signature reply sent for {serial_for_reader}");
+                                        debug!("Post-auth signature reply sent for {serial_for_reader}");
                                     }
                                 }
                             }
                             x if x == AuthType::Ok as u8 => {
-                                info!("Daemon sends post-auth OK for {serial_for_reader}");
+                                debug!("Daemon sends post-auth OK for {serial_for_reader}");
                             }
                             other => {
                                 warn!("Unexpected post-auth auth type from daemon for {serial_for_reader}: {other}");
@@ -4697,11 +4803,11 @@ async fn start_usb_session(
                 if e.kind() == ErrorKind::InvalidData && e.to_string().contains("nop/reset") {
                     continue;
                 }
-                warn!("USB read error for {serial_for_reader}: {e}");
-                break;
+                let clean = e.kind() == ErrorKind::NotConnected;
+                break (clean, format!("read error: {e}"));
             }
         }
-    }
+    };
 
     // Cleanup
     connect_map.remove(&serial).await;
@@ -4715,6 +4821,8 @@ async fn start_usb_session(
     // Clean up any port forwarding entries for this device so listeners
     // do not keep accepting connections after disconnect.
     let _ = remove_forward_entry(&tcp_map, &usb_map, &forward_map, &serial, 0, "").await;
+
+    SessionOutcome::Ended { clean, reason }
 }
 
 #[cfg(test)]

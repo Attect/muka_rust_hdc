@@ -16,12 +16,15 @@ use tracing::{debug, error, info};
 
 #[tokio::main]
 async fn main() {
-    // Setup tracing, use local timezone for timestamps
+    // Setup tracing, use local timezone for timestamps.
+    // ANSI colors are disabled so parent processes (IDE / device-host) can parse
+    // log lines from stdout/stderr reliably.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        .with_ansi(false)
         .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
         .init();
 

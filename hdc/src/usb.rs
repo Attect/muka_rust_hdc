@@ -147,7 +147,7 @@ impl AsyncUsbConnection {
 
 /// Enumerate connected HarmonyOS devices via USB.
 pub async fn enumerate_harmony_devices() -> Vec<UsbDeviceInfo> {
-    info!("usb: starting device enumeration");
+    debug!("usb: starting device enumeration");
     let result = tokio::task::spawn_blocking(|| {
         let mut devices = Vec::new();
         let dev_list = match rusb::devices() {
@@ -196,7 +196,7 @@ pub async fn enumerate_harmony_devices() -> Vec<UsbDeviceInfo> {
                                 && alt.protocol_code() == HARMONY_PROTOCOL
                                 && alt.endpoint_descriptors().count() == HARMONY_EP_NUM as usize
                             {
-                                info!(
+                                debug!(
                                     "Found HarmonyOS device: serial={}, VID={:04X}, PID={:04X}",
                                     serial, desc.vendor_id(), desc.product_id()
                                 );
@@ -219,7 +219,7 @@ pub async fn enumerate_harmony_devices() -> Vec<UsbDeviceInfo> {
         devices
     }).await.unwrap_or_default();
 
-    info!("usb: enumeration complete, found {} devices", result.len());
+    debug!("usb: enumeration complete, found {} devices", result.len());
     result
 }
 
@@ -289,7 +289,7 @@ pub async fn connect_usb_device(serial: &str) -> io::Result<AsyncUsbConnection> 
             }
 
             if let (Some(iface_num), Some(in_addr), Some(out_addr)) = (target_interface, target_bulk_in, target_bulk_out) {
-                info!("Claiming interface {iface_num} for device {serial}, Bulk IN={in_addr}, Bulk OUT={out_addr}");
+                debug!("Claiming interface {iface_num} for device {serial}, Bulk IN={in_addr}, Bulk OUT={out_addr}");
                 handle.claim_interface(iface_num)
                     .map_err(|e| Error::new(ErrorKind::Other, format!("claim interface failed: {e}")))?;
 
